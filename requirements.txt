@@ -1,4 +1,4 @@
 Flask
 yt-dlp
 youtube-search-python
-httpx==0.23.0
+httpx==0.23.3
