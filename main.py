@@ -10,7 +10,7 @@ import queue
 app = Flask(__name__)
 
 # Ruta de descargas
-DOWNLOAD_DIR = '/tmp'
+DOWNLOAD_DIR = './'
 
 def leer_version():
     try:
@@ -48,7 +48,6 @@ def download_worker(url, fmt, download_id):
 
     ydl_opts = {
         'format': 'bestvideo+bestaudio/best',
-        'cookiefile': 'cookies.txt',  # 👈 aquí va
         'outtmpl': output_template,
         'noplaylist': True,
         'quiet': True,
@@ -58,7 +57,6 @@ def download_worker(url, fmt, download_id):
     if fmt == 'mp3':
         ydl_opts.update({
             'format': 'bestaudio/best',
-            'cookiefile': 'cookies.txt',  # 👈 aquí va
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
