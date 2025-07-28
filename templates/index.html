@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>🎬 Descargador Rosado YouTube</title>
+  <title>ExtDowloader</title>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet" />
   <style>
     :root {
@@ -273,6 +273,33 @@ button svg {
         width: 100%;
       }
     }
+#video-loader {
+  display: flex;
+  flex-direction: column;
+  justify-content: center; /* Centra vertical */
+  align-items: center;     /* Centra horizontal */
+  height: 200px;           /* Ajusta la altura del área del loader */
+  font-size: 1.2rem;
+  color: #444;
+}
+
+/* Spinner CSS */
+#video-loader::before {
+  content: "";
+  width: 40px;
+  height: 40px;
+  margin-bottom: 10px;
+  border: 4px solid #ccc;
+  border-top-color: #333;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+
   </style>
   <script src="/static/script.js"></script>
 <script>
@@ -293,7 +320,7 @@ button svg {
 
 </head>
 <body>
-  <h1>🎬 Youtube Downloader</h1>
+  <h1>Ext Downloader</h1>
 
   <div id="search-container">
     <input id="query" type="search" placeholder="Buscar video..." />
@@ -322,12 +349,21 @@ button svg {
   </div>
 
   <!-- MODAL VIDEO -->
-  <div id="modal-video" class="modal" role="dialog" aria-modal="true">
-    <div class="modal-content" id="modal-video-content">
-      <span class="modal-close" onclick="closeVideoModal()">&times;</span>
-      <h3>Reproduciendo video</h3>
-      <video id="video-player" controls preload="metadata"></video>
+<div id="modal-video" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-content" id="modal-video-content">
+    <span class="modal-close" onclick="closeVideoModal()">&times;</span>
+    <h3>Reproduciendo video</h3>
+
+    <!-- Loader, inicialmente visible -->
+    <div id="video-loader" style="display: none; text-align:center; padding: 20px;">
+      <span>Cargando video...</span>
+      <!-- Opcional: un spinner CSS o gif aquí -->
     </div>
+
+    <!-- Video, inicialmente oculto -->
+    <video id="video-player" controls preload="metadata" style="display:none; width: 100%; height: auto;"></video>
   </div>
+</div>
+
 </body>
 </html>

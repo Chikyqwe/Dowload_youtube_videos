@@ -6,11 +6,13 @@ import threading
 import uuid
 import time
 import queue
+import tempfile
 
 app = Flask(__name__)
 
-# Ruta de descargas
-DOWNLOAD_DIR = './'
+# Carpeta temporal para descargas
+DOWNLOAD_DIR = tempfile.mkdtemp(prefix="downloads_")
+print(f"[INFO] Carpeta temporal: {DOWNLOAD_DIR}")
 
 def leer_version():
     try:
@@ -19,16 +21,12 @@ def leer_version():
     except FileNotFoundError:
         return "0.0"
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# Estado de descargas: {id: progreso, id_file: ruta, id_name: nombre real}
+# Estados de descarga y colas
 download_progress = {}
 progress_lock = threading.Lock()
-
-# Cola para trabajos de descarga
 download_queue = queue.Queue()
 queue_list_lock = threading.Lock()
-queued_ids = []  # Para seguimiento ordenado y mostrar la lista
+queued_ids = []
 
 def progress_hook(d, download_id):
     with progress_lock:
@@ -40,11 +38,11 @@ def progress_hook(d, download_id):
                 download_progress[download_id] = percent
                 print(f"[{download_id}] Progreso: {percent}%")
         elif d['status'] == 'finished':
-            print(f"[{download_id}] Descarga finalizada")
             download_progress[download_id] = 100
+            print(f"[{download_id}] Descarga finalizada")
 
 def download_worker(url, fmt, download_id):
-    output_template = os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')
+    output_template = os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')  # Usar nombre del video
 
     ydl_opts = {
         'format': 'bestvideo+bestaudio/best',
@@ -62,7 +60,6 @@ def download_worker(url, fmt, download_id):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192'
             }],
-            'outtmpl': output_template
         })
 
     try:
@@ -73,12 +70,10 @@ def download_worker(url, fmt, download_id):
                 filename = os.path.splitext(filename)[0] + '.mp3'
 
             filename = os.path.abspath(filename)
-            basename = os.path.basename(filename)  # nombre real con extensión
+            basename = os.path.basename(filename)
 
-            # Esperar archivo estable
             wait_time, stable_checks = 0, 0
             last_size = -1
-
             while wait_time < 20:
                 if os.path.exists(filename):
                     current_size = os.path.getsize(filename)
@@ -101,7 +96,7 @@ def download_worker(url, fmt, download_id):
             else:
                 with progress_lock:
                     download_progress[download_id] = -1
-                    print(f"[{download_id}] Error: archivo no válido")
+                    print(f"[{download_id}] Archivo no válido")
 
     except Exception as e:
         with progress_lock:
@@ -112,7 +107,7 @@ def queue_worker():
     while True:
         job = download_queue.get()
         if job is None:
-            break  # Permite parar el hilo si es necesario
+            break
         url, fmt, download_id = job
         print(f"[QUEUE] Empezando descarga {download_id}")
         download_worker(url, fmt, download_id)
@@ -122,9 +117,39 @@ def queue_worker():
         download_queue.task_done()
         print(f"[QUEUE] Descarga {download_id} finalizada")
 
-# Iniciar el hilo trabajador en background (daemon=True para que no bloquee al cerrar)
+# Limpieza de archivos viejos o en exceso (cada 2 minutos)
+def cleanup_old_files():
+    while True:
+        try:
+            files = [
+                (os.path.join(DOWNLOAD_DIR, f), os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)))
+                for f in os.listdir(DOWNLOAD_DIR)
+                if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))
+            ]
+            now = time.time()
+            files.sort(key=lambda x: x[1])
+
+            for fpath, mtime in files:
+                if now - mtime > 300:
+                    os.remove(fpath)
+                    print(f"[CLEANUP] Borrado por antigüedad: {fpath}")
+
+            if len(files) > 20:
+                for fpath, _ in files[:len(files) - 20]:
+                    if os.path.exists(fpath):
+                        os.remove(fpath)
+                        print(f"[CLEANUP] Borrado por exceso: {fpath}")
+
+        except Exception as e:
+            print(f"[CLEANUP] Error: {e}")
+
+        time.sleep(120)
+
 worker_thread = threading.Thread(target=queue_worker, daemon=True)
 worker_thread.start()
+
+cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
+cleanup_thread.start()
 
 @app.route('/')
 def index():
@@ -206,14 +231,16 @@ def get_file():
         return jsonify({'error': 'Archivo no disponible'}), 404
 
     if not os.path.exists(filename):
-        print(f"[{download_id}] Archivo no encontrado: {filename}")
         return jsonify({'error': 'Archivo no encontrado en disco'}), 404
 
     ext = os.path.splitext(real_name)[1].lower()
-    if ext not in ['.mp3', '.mp4', 'webm']:
+    if ext not in ['.mp3', '.mp4', '.webm']:
         return jsonify({'error': 'Formato no permitido'}), 400
 
-    return send_file(filename, as_attachment=True, download_name=real_name)
+    try:
+        return send_file(filename, as_attachment=True, download_name=real_name)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/video_url')
 def video_url():

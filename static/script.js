@@ -1,213 +1,241 @@
-    // Variables para modales
-    let currentUrl = "";
-    let downloadModal = null;
-    let videoModal = null;
+let currentUrl = "";
+let downloadModal = null;
+let videoModal = null;
+let modalLocked = false; // 🔒 Controla si se puede cerrar el modal
 
-    // Abre modal descarga con URL
-    function openModal(url) {
-      currentUrl = url;
-      downloadModal = document.getElementById("modal-download");
-      downloadModal.classList.add("show");
-      resetProgress();
+// Mostrar modal de descarga
+function openModal(url) {
+  currentUrl = url;
+  downloadModal = document.getElementById("modal-download");
+  downloadModal.classList.add("show");
+  resetProgress();
+  setButtonState(false, "Iniciar descarga");
+  modalLocked = false;
 
-      // Configurar botón iniciar descarga
-      const btn = document.getElementById("start-download");
-      btn.disabled = false;
-      btn.textContent = "Iniciar descarga";
-      btn.onclick = () => iniciarDescarga(currentUrl);
-    }
+  document.getElementById("start-download").onclick = () => iniciarDescarga(currentUrl);
+}
 
-    // Cierra modal descarga
-    function closeModal() {
-      if (downloadModal) {
-        downloadModal.classList.remove("show");
-        resetProgress();
-      }
-    }
+// Cerrar modal de descarga
+function closeModal() {
+  if (downloadModal) {
+    downloadModal.classList.remove("show");
+    resetProgress();
+  }
+}
 
-    // Resetea barra de progreso
-    function resetProgress() {
-      const progress = document.getElementById("progress");
-      progress.style.width = "0%";
-    }
+// Resetear barra de progreso
+function resetProgress() {
+  document.getElementById("progress").style.width = "0%";
+}
 
-    async function iniciarDescarga(url) {
-  const formato = document.getElementById("formato").value;
+// Cambia estado y texto del botón de descarga
+function setButtonState(disabled, text) {
   const btn = document.getElementById("start-download");
-  const progress = document.getElementById("progress");
+  btn.disabled = disabled;
+  btn.textContent = text;
+}
 
-  btn.disabled = true;
-  btn.textContent = "Iniciando descarga...";
+// Iniciar descarga con seguimiento
+async function iniciarDescarga(url) {
+  const formato = document.getElementById("formato").value;
+  setButtonState(true, "Iniciando descarga...");
+  modalLocked = true;
 
-  // 1. Solicitar inicio de descarga y recibir id
-  const res = await fetch(`/download?url=${encodeURIComponent(url)}&format=${formato}`);
-  const data = await res.json();
-  if (!data.download_id) {
+  try {
+    const res = await fetch(`/download?url=${encodeURIComponent(url)}&format=${formato}`);
+    const data = await res.json();
+    if (!data.download_id) throw new Error("Fallo al iniciar descarga");
+
+    trackProgress(data.download_id);
+  } catch (e) {
     alert("Error iniciando la descarga");
-    btn.disabled = false;
-    btn.textContent = "Iniciar descarga";
-    return;
+    console.error(e);
+    setButtonState(false, "Iniciar descarga");
+    modalLocked = false;
+  }
+}
+
+// Hacer seguimiento del progreso y descargar el archivo
+async function trackProgress(downloadId) {
+  const progressEl = document.getElementById("progress");
+
+  const poll = async () => {
+    try {
+      const res = await fetch(`/progress?id=${downloadId}`);
+      const data = await res.json();
+
+      if (data.progress >= 0) {
+        setButtonState(true, "Descargando");
+        const scaledProgress = Math.min(data.progress * 0.6, 60);
+        progressEl.style.width = `${scaledProgress}%`;
+      }
+
+      if (data.progress === 100) {
+        return attemptDownload(downloadId);
+      }
+
+      if (data.progress === -1) {
+        throw new Error("Fallo en la descarga");
+      }
+
+      setTimeout(poll, 1000);
+    } catch (e) {
+      alert("Error en la descarga");
+      console.error(e);
+      setButtonState(false, "Iniciar descarga");
+      modalLocked = false;
+    }
+  };
+
+  poll();
+}
+
+// Intentar descarga con reintentos
+async function attemptDownload(downloadId) {
+  const progressEl = document.getElementById("progress");
+  let attempts = 0;
+  const maxAttempts = 12;
+
+  while (attempts < maxAttempts) {
+    try {
+      const res = await fetch(`/get_file?id=${downloadId}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const blob = await res.blob();
+      if (blob.size === 0) throw new Error("El archivo descargado está vacío.");
+
+      const filename = extractFilenameFromHeader(res.headers.get('Content-Disposition') || '');
+      const url = window.URL.createObjectURL(new Blob([blob], { type: blob.type || "application/octet-stream" }));
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      progressEl.style.width = `100%`;
+      setButtonState(true, "Espere por favor...");
+      setTimeout(() => {
+        setButtonState(false, "Iniciar descarga");
+        modalLocked = false; // 🔓 desbloquear
+        closeModal();
+      }, 2000);
+
+      return;
+    } catch (e) {
+      console.warn(`Intento ${attempts + 1} fallido`, e);
+      attempts++;
+      await new Promise(r => setTimeout(r, 5000));
+    }
   }
 
-  const downloadId = data.download_id;
-  progress.style.width = "0%";
-
-  // 2. Polling cada segundo para actualizar barra
-  const intervalo = setInterval(async () => {
-    const resp = await fetch(`/progress?id=${downloadId}`);
-    const progresoData = await resp.json();
-
-    if (progresoData.progress >= 0) {
-      progress.style.width = progresoData.progress + "%";
-    }
-
-if (progresoData.progress === 100) {
-  clearInterval(intervalo);
-
-  setTimeout(async () => {
-    let intentos = 0;
-    const maxIntentos = 12;
-    let exito = false;
-
-    while (intentos < maxIntentos && !exito) {
-      try {
-        const response = await fetch(`/get_file?id=${downloadId}`);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-        const disposition = response.headers.get('Content-Disposition');
-        let filename = 'archivo.mp3'; // fallback
-        if (disposition && disposition.indexOf('filename=') !== -1) {
-          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-          const matches = filenameRegex.exec(disposition);
-          if (matches != null && matches[1]) {
-            filename = matches[1].replace(/['"]/g, '');
-          }
-        }
-
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;  // <-- Aquí asignas el nombre real extraído
-        a.style.display = 'none';
-
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-
-        window.URL.revokeObjectURL(url);
-        exito = true;
-        btn.textContent = "Espere porfavor...";
-        
-setTimeout(() => {
-  btn.disabled = false;
-  btn.textContent = "Iniciar descarga";
-  closeModal();
-}, 2000); // 2000 milisegundos = 2 segundos
-
-      } catch (error) {
-        console.warn(`Intento ${intentos + 1} fallido:`, error);
-        intentos++;
-        await new Promise(resolve => setTimeout(resolve, 5000));  // Espera 1 segundo antes del siguiente intento
-      }
-    }
-
-    if (!exito) {
-      btn.textContent = "Error en la descarga";
-      btn.disabled = false;
-      alert("No se pudo descargar el archivo tras varios intentos.");
-    }
-  }, 3000);
+  setButtonState(false, "Iniciar descarga");
+  alert("No se pudo descargar el archivo tras varios intentos.");
+  modalLocked = false;
 }
 
-    if (progresoData.progress === -1) {
-      clearInterval(intervalo);
-      alert("Error en la descarga");
-      btn.disabled = false;
-      btn.textContent = "Iniciar descarga";
-    }
-  }, 1000);
+function extractFilenameFromHeader(header) {
+  const match = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(header);
+  if (match != null && match[1]) {
+    return match[1].replace(/['"]/g, '');
+  }
+  return `archivo-${Date.now()}`;
 }
 
-// Función para obtener URL real y abrir modal
-async function reproducirVideo(urlVideo) {
+// Buscar videos
+async function buscar() {
+  const q = document.getElementById("query").value.trim();
+  if (!q) return alert("Por favor, escribe algo para buscar.");
+
   try {
-    openVideoModal()
+    const res = await fetch(`/search?q=${encodeURIComponent(q)}`);
+    if (!res.ok) throw new Error("Error en la respuesta del servidor");
+
+    const videos = await res.json();
+    const container = document.getElementById("resultados");
+    container.innerHTML = videos.length
+      ? ""
+      : "<p>No se encontraron resultados.</p>";
+
+    videos.forEach(({ title, url, thumbnail }) => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <div class="media-container">
+          <img src="${thumbnail}" alt="Miniatura video" loading="lazy" />
+        </div>
+        <h3>${title}</h3>
+        <div class="buttons-container">
+          <button class="btn-download" onclick="openModal('${url}')">Descargar</button>
+          <button class="btn-play" onclick="reproducirVideo('${url}')">Reproducir</button>
+        </div>`;
+      container.appendChild(card);
+    });
+  } catch (e) {
+    alert("Error al buscar videos. Intenta de nuevo más tarde.");
+    console.error(e);
+  }
+}
+
+// Obtener URL real y reproducir video
+async function reproducirVideo(urlVideo) {
+  openVideoModal(null, true); // mostrar modal con loader
+
+  try {
     const res = await fetch(`/video_url?url=${encodeURIComponent(urlVideo)}`);
     if (!res.ok) throw new Error("Error al obtener URL del video");
-    const data = await res.json();
-    openVideoModal(data.direct_url);
-  } catch (error) {
+
+    const { direct_url } = await res.json();
+    openVideoModal(direct_url);
+  } catch (e) {
     alert("No se pudo cargar el video");
-    console.error(error);
+    console.error(e);
+    closeVideoModal();
   }
 }
 
+function openVideoModal(videoUrl = null, loading = false) {
+  const modal = document.getElementById('modal-video');
+  const video = document.getElementById('video-player');
+  const loader = document.getElementById('video-loader');
 
-    // Abre modal video para reproducir mp4
-    function openVideoModal(url) {
-      videoModal = document.getElementById("modal-video");
-      videoModal.classList.add("show");
+  modal.classList.add('show');
+  modalLocked = loading;
 
-      const videoEl = document.getElementById("video-player");
-      videoEl.src = url;
-      videoEl.load();
-      videoEl.play();
-    }
-
-    // Cierra modal video
-    function closeVideoModal() {
-      if (!videoModal) return;
-      const videoEl = document.getElementById("video-player");
-      videoEl.pause();
-      videoEl.src = "";
-      videoModal.classList.remove("show");
-    }
-
-    // Cerrar modal con click fuera contenido
-    window.onclick = function(event) {
-      if (event.target === downloadModal) closeModal();
-      if (event.target === videoModal) closeVideoModal();
-    }
-
-    // Función búsqueda simulada, remplaza con backend real
-    async function buscar() {
-    const q = document.getElementById("query").value.trim();
-    if (!q) return alert("Por favor, escribe algo para buscar.");
-
-    try {
-      const res = await fetch(`/search?q=${encodeURIComponent(q)}`);
-      if (!res.ok) throw new Error("Error en la respuesta del servidor");
-
-      const videos = await res.json();
-      const container = document.getElementById("resultados");
-      container.innerHTML = "";
-
-      if (!videos.length) {
-        container.innerHTML = `<p>No se encontraron resultados.</p>`;
-        return;
-      }
-
-      videos.forEach(v => {
-        const card = document.createElement("div");
-        card.className = "card";
-        card.innerHTML = `
-          <div class="media-container">
-            <img src="${v.thumbnail}" alt="Miniatura video" loading="lazy" />
-          </div>
-          <h3>${v.title}</h3>
-          <div class="buttons-container">
-            <button class="btn-download" onclick="openModal('${v.url}')">Descargar</button>
-            <button class="btn-play" onclick="reproducirVideo('${v.url}')">Reproducir</button>
-
-          </div>
-        `;
-        container.appendChild(card);
-      });
-
-    } catch (e) {
-      alert("Error al buscar videos. Intenta de nuevo más tarde.");
-      console.error(e);
-    }
+  if (loading) {
+    loader.style.display = 'flex';
+    video.style.display = 'none';
+    video.src = "";
+  } else if (videoUrl) {
+    loader.style.display = 'none';
+    video.style.display = 'block';
+    video.src = videoUrl;
+    video.load();
+    video.play();
+    modalLocked = false;
   }
+}
+
+function closeVideoModal() {
+  const modal = document.getElementById('modal-video');
+  const video = document.getElementById('video-player');
+  const loader = document.getElementById('video-loader');
+
+  video.pause();
+  video.src = "";
+  video.style.display = 'none';
+  loader.style.display = 'none';
+  modal.classList.remove('show');
+}
+
+// Cerrar modales al hacer click fuera (si no está bloqueado)
+window.onclick = function (event) {
+  const download = document.getElementById("modal-download");
+  const video = document.getElementById("modal-video");
+
+  if (event.target === download && !modalLocked) closeModal();
+  if (event.target === video && !modalLocked) closeVideoModal();
+};
