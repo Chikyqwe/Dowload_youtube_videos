@@ -14,10 +14,9 @@ from urllib.parse import quote
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# Cuentas fijas de YouTube
+# Archivo de cookies para YouTube (autenticación segura)
 # ---------------------------------------------------------
-YT_EMAIL = "downext5@gmail.com"
-YT_PASS = "extdown78."
+COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
 # ---------------------------------------------------------
 # Carpeta temporal para descargas
@@ -32,26 +31,25 @@ download_queue = queue.Queue()
 queue_list_lock = threading.Lock()
 queued_ids = []
 
+
 # ---------------------------------------------------------
 # Función para ejecutar yt-dlp binario
 # ---------------------------------------------------------
 def download_worker(url, fmt, download_id):
-    output_template = os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')
+    output_template = os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s")
 
-    # Construir comando como lista
-    cmd = ['./yt-dlp', '--no-playlist', '-o', output_template]
+    cmd = ["./yt-dlp", "--no-playlist", "-o", output_template]
+
+    # Agregar cookies si existen
+    if os.path.exists(COOKIES_FILE):
+        cmd += ["--cookies", COOKIES_FILE]
 
     # Elegir formato
-    if fmt == 'mp3':
-        cmd += ['-x', '--audio-format', 'mp3']
+    if fmt == "mp3":
+        cmd += ["-x", "--audio-format", "mp3"]
     else:
-        cmd += ['-f', 'bestvideo+bestaudio/best']
+        cmd += ["-f", "bestvideo+bestaudio/best"]
 
-    # Agregar credenciales fijas
-    if YT_EMAIL and YT_PASS:
-        cmd += ['-u', YT_EMAIL, '-p', YT_PASS]
-
-    # URL a descargar
     cmd.append(url)
 
     try:
@@ -59,14 +57,13 @@ def download_worker(url, fmt, download_id):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            universal_newlines=True
+            universal_newlines=True,
         )
 
-        # Parsear progreso aproximado
         for line in process.stdout:
-            if '%' in line:
+            if "%" in line:
                 try:
-                    percent = int(line.split('%')[0].split()[-1])
+                    percent = int(line.split("%")[0].split()[-1])
                     with progress_lock:
                         download_progress[download_id] = percent
                         print(f"[{download_id}] Progreso: {percent}%")
@@ -97,6 +94,7 @@ def download_worker(url, fmt, download_id):
             download_progress[download_id] = -1
         print(f"[{download_id}] Error: {e}")
 
+
 # ---------------------------------------------------------
 # Worker de la cola
 # ---------------------------------------------------------
@@ -114,8 +112,9 @@ def queue_worker():
         download_queue.task_done()
         print(f"[QUEUE] Descarga {download_id} finalizada")
 
+
 # ---------------------------------------------------------
-# Limpieza de archivos antiguos o excesivos
+# Limpieza automática de archivos viejos
 # ---------------------------------------------------------
 def cleanup_old_files():
     while True:
@@ -134,7 +133,7 @@ def cleanup_old_files():
                     print(f"[CLEANUP] Borrado por antigüedad: {fpath}")
 
             if len(files) > 20:
-                for fpath, _ in files[:len(files) - 20]:
+                for fpath, _ in files[: len(files) - 20]:
                     if os.path.exists(fpath):
                         os.remove(fpath)
                         print(f"[CLEANUP] Borrado por exceso: {fpath}")
@@ -144,44 +143,42 @@ def cleanup_old_files():
 
         time.sleep(120)
 
+
 # ---------------------------------------------------------
 # Threads
 # ---------------------------------------------------------
-worker_thread = threading.Thread(target=queue_worker, daemon=True)
-worker_thread.start()
+threading.Thread(target=queue_worker, daemon=True).start()
+threading.Thread(target=cleanup_old_files, daemon=True).start()
 
-cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
-cleanup_thread.start()
 
 # ---------------------------------------------------------
 # Rutas Flask
 # ---------------------------------------------------------
-@app.route('/')
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/search')
+
+@app.route("/search")
 def search():
-    query = request.args.get('q', '')
+    query = request.args.get("q", "")
     if not query:
         return jsonify([])
-
-    videos = VideosSearch(query, limit=20).result().get('result', [])
-    results = [{
-        'title': v['title'],
-        'url': v['link'],
-        'thumbnail': v['thumbnails'][0]['url']
-    } for v in videos]
-
+    videos = VideosSearch(query, limit=20).result().get("result", [])
+    results = [
+        {"title": v["title"], "url": v["link"], "thumbnail": v["thumbnails"][0]["url"]}
+        for v in videos
+    ]
     return jsonify(results)
 
-@app.route('/download')
+
+@app.route("/download")
 def download():
-    url = request.args.get('url')
-    fmt = request.args.get('format', 'mp4')
+    url = request.args.get("url")
+    fmt = request.args.get("format", "mp4")
 
     if not url:
-        return abort(400, 'URL requerida')
+        return abort(400, "URL requerida")
 
     download_id = str(uuid.uuid4())
     with progress_lock:
@@ -191,9 +188,12 @@ def download():
         queued_ids.append(download_id)
     download_queue.put((url, fmt, download_id))
 
-    return jsonify({'download_id': download_id, 'position_in_queue': queued_ids.index(download_id) + 1})
+    return jsonify(
+        {"download_id": download_id, "position_in_queue": queued_ids.index(download_id) + 1}
+    )
 
-@app.route('/queue')
+
+@app.route("/queue")
 def queue_status():
     with queue_list_lock:
         queue_info = []
@@ -201,27 +201,29 @@ def queue_status():
             with progress_lock:
                 prog = download_progress.get(did, 0)
             estado = "En cola" if prog == 0 else f"Progreso: {prog}%"
-            queue_info.append({'download_id': did, 'position': idx, 'status': estado})
+            queue_info.append({"download_id": did, "position": idx, "status": estado})
     return jsonify(queue_info)
 
-@app.route('/progress')
+
+@app.route("/progress")
 def progress():
-    download_id = request.args.get('id')
+    download_id = request.args.get("id")
     if not download_id:
-        return jsonify({'error': 'ID requerido'}), 400
+        return jsonify({"error": "ID requerido"}), 400
 
     with progress_lock:
         prog = download_progress.get(download_id)
         if prog is None:
-            return jsonify({'error': 'ID inválido'}), 404
+            return jsonify({"error": "ID inválido"}), 404
 
-    return jsonify({'progress': prog})
+    return jsonify({"progress": prog})
 
-@app.route('/get_file')
+
+@app.route("/get_file")
 def get_file():
-    download_id = request.args.get('id')
+    download_id = request.args.get("id")
     if not download_id:
-        return jsonify({'error': 'ID requerido'}), 400
+        return jsonify({"error": "ID requerido"}), 400
 
     with progress_lock:
         prog = download_progress.get(download_id)
@@ -229,80 +231,86 @@ def get_file():
         real_name = download_progress.get(f"{download_id}_name")
 
     if prog != 100 or not filename or not real_name:
-        return jsonify({'error': 'Archivo no disponible'}), 404
+        return jsonify({"error": "Archivo no disponible"}), 404
 
     if not os.path.exists(filename):
-        return jsonify({'error': 'Archivo no encontrado en disco'}), 404
+        return jsonify({"error": "Archivo no encontrado en disco"}), 404
 
     ext = os.path.splitext(real_name)[1].lower()
-    if ext not in ['.mp3', '.mp4', '.webm']:
-        return jsonify({'error': 'Formato no permitido'}), 400
+    if ext not in [".mp3", ".mp4", ".webm"]:
+        return jsonify({"error": "Formato no permitido"}), 400
 
     try:
         return send_file(filename, as_attachment=True, download_name=real_name)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/video_url')
+
+@app.route("/video_url")
 def video_url():
-    url = request.args.get('url')
+    url = request.args.get("url")
     if not url:
-        return jsonify({'error': 'URL requerida'}), 400
+        return jsonify({"error": "URL requerida"}), 400
 
-    cmd = ['./yt-dlp', '-f', 'best[ext=mp4]', '--get-url']
-    if YT_EMAIL and YT_PASS:
-        cmd += ['-u', YT_EMAIL, '-p', YT_PASS]
+    cmd = ["./yt-dlp", "-f", "best[ext=mp4]", "--get-url"]
+    if os.path.exists(COOKIES_FILE):
+        cmd += ["--cookies", COOKIES_FILE]
     cmd.append(url)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         direct_url = result.stdout.strip()
-        return jsonify({'direct_url': direct_url})
+        return jsonify({"direct_url": direct_url})
     except subprocess.CalledProcessError as e:
-        return jsonify({'error': 'No se pudo obtener la URL', 'details': e.stderr}), 500
+        err = e.stderr or "Error desconocido"
+        if "Sign in to confirm" in err or "Login required" in err:
+            err = "Cookies expiradas o inválidas"
+        return jsonify({"error": "No se pudo obtener la URL", "details": err}), 500
 
-@app.route('/video-player')
+
+@app.route("/video-player")
 def video_player_proxy():
-    url = request.args.get('url')
+    url = request.args.get("url")
     if not url:
-        return jsonify({'error': 'URL requerida'}), 400
+        return jsonify({"error": "URL requerida"}), 400
 
     try:
-        if url.endswith('.m3u8'):
+        if url.endswith(".m3u8"):
             r = requests.get(url, timeout=10)
             if r.status_code != 200:
-                return jsonify({'error': 'No se pudo obtener el m3u8'}), 502
+                return jsonify({"error": "No se pudo obtener el m3u8"}), 502
 
             playlist = r.text
             modified_lines = []
 
             for line in playlist.splitlines():
                 line = line.strip()
-                if line and not line.startswith('#') and line.startswith('http'):
+                if line and not line.startswith("#") and line.startswith("http"):
                     proxied_url = f"/video-player?url={quote(line, safe='')}"
                     modified_lines.append(proxied_url)
                 else:
                     modified_lines.append(line)
 
             modified_playlist = "\n".join(modified_lines)
-            return Response(modified_playlist, content_type='application/vnd.apple.mpegurl')
+            return Response(modified_playlist, content_type="application/vnd.apple.mpegurl")
         else:
             r = requests.get(url, stream=True, timeout=10)
             if r.status_code != 200:
-                return jsonify({'error': 'No se pudo obtener el recurso'}), 502
+                return jsonify({"error": "No se pudo obtener el recurso"}), 502
 
             return Response(
-                r.iter_content(chunk_size=1024*1024),
-                content_type=r.headers.get('content-type', 'application/octet-stream'),
-                status=r.status_code
+                r.iter_content(chunk_size=1024 * 1024),
+                content_type=r.headers.get("content-type", "application/octet-stream"),
+                status=r.status_code,
             )
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
+
 
 # ---------------------------------------------------------
 # Ejecutar servidor
 # ---------------------------------------------------------
-if __name__ == '__main__':
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5555))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(debug=False, host="0.0.0.0", port=port)
