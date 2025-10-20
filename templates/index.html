@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ExtDowloader</title>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     :root {
       --bg-main: linear-gradient(135deg, #ffeaf4, #e0f7ff);
@@ -302,21 +303,6 @@ button svg {
 
   </style>
   <script src="/static/script.js"></script>
-<script>
-  const currentVersion = "{{ version }}";
-
-  setInterval(() => {
-    fetch("/version")
-      .then(res => res.text())
-      .then(serverVersion => {
-        if (serverVersion !== currentVersion) {
-          location.reload(true); // fuerza recarga completa
-        }
-      })
-      .catch(err => console.error("Error al verificar versión:", err));
-  }, 500); // cada 500 ms
-</script>
-
 
 </head>
 <body>

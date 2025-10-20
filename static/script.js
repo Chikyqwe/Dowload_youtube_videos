@@ -182,42 +182,54 @@ async function buscar() {
 
 // Obtener URL real y reproducir video
 async function reproducirVideo(urlVideo) {
-  openVideoModal(null, true); // mostrar modal con loader
-
-  try {
-    const res = await fetch(`/video_url?url=${encodeURIComponent(urlVideo)}`);
-    if (!res.ok) throw new Error("Error al obtener URL del video");
-
-    const { direct_url } = await res.json();
-    openVideoModal(direct_url);
-  } catch (e) {
-    alert("No se pudo cargar el video");
-    console.error(e);
-    closeVideoModal();
-  }
-}
-
-function openVideoModal(videoUrl = null, loading = false) {
   const modal = document.getElementById('modal-video');
   const video = document.getElementById('video-player');
   const loader = document.getElementById('video-loader');
 
+  // Mostrar modal con loader
   modal.classList.add('show');
-  modalLocked = loading;
+  loader.style.display = 'flex';
+  video.style.display = 'none';
+  video.src = "";
+  modalLocked = true;
 
-  if (loading) {
-    loader.style.display = 'flex';
-    video.style.display = 'none';
-    video.src = "";
-  } else if (videoUrl) {
+  try {
+    // Obtener URL directa del video
+    const res = await fetch(`/video_url?url=${encodeURIComponent(urlVideo)}`);
+    if (!res.ok) throw new Error("No se pudo obtener la URL del video");
+    const { direct_url } = await res.json();
+
+    // Preparar URL para el player
+    const proxyUrl = `/video-player?url=${encodeURIComponent(direct_url)}`;
+
+    if (Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(proxyUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = proxyUrl;
+      video.addEventListener("loadedmetadata", () => video.play());
+    } else {
+      throw new Error("HLS no soportado");
+    }
+
+    // Ocultar loader y mostrar video
     loader.style.display = 'none';
     video.style.display = 'block';
-    video.src = videoUrl;
-    video.load();
-    video.play();
+    modalLocked = false;
+
+  } catch (e) {
+    console.error(e);
+    alert("No se pudo reproducir el video");
+    // Cerrar modal en caso de error
+    video.pause();
+    video.src = "";
+    modal.classList.remove('show');
     modalLocked = false;
   }
 }
+
 
 function closeVideoModal() {
   const modal = document.getElementById('modal-video');

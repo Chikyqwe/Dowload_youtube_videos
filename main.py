@@ -1,25 +1,21 @@
-from flask import Flask, request, jsonify, send_file, render_template, abort
-from youtubesearchpython import VideosSearch
-import yt_dlp
+from flask import Flask, request, jsonify,Response,send_file, render_template, abort
 import os
 import threading
 import uuid
 import time
 import queue
 import tempfile
+import subprocess
+import shlex
+from youtubesearchpython import VideosSearch
+import requests
+from urllib.parse import quote
 
 app = Flask(__name__)
 
 # Carpeta temporal para descargas
 DOWNLOAD_DIR = tempfile.mkdtemp(prefix="downloads_")
 print(f"[INFO] Carpeta temporal: {DOWNLOAD_DIR}")
-
-def leer_version():
-    try:
-        with open("version.ve", "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return "0.0"
 
 # Estados de descarga y colas
 download_progress = {}
@@ -28,81 +24,60 @@ download_queue = queue.Queue()
 queue_list_lock = threading.Lock()
 queued_ids = []
 
-def progress_hook(d, download_id):
-    with progress_lock:
-        if d['status'] == 'downloading':
-            total = d.get('total_bytes') or d.get('total_bytes_estimate')
-            downloaded = d.get('downloaded_bytes', 0)
-            if total:
-                percent = int(downloaded / total * 100)
-                download_progress[download_id] = percent
-                print(f"[{download_id}] Progreso: {percent}%")
-        elif d['status'] == 'finished':
-            download_progress[download_id] = 100
-            print(f"[{download_id}] Descarga finalizada")
-
+# Función para ejecutar yt-dlp binario
 def download_worker(url, fmt, download_id):
-    output_template = os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')  # Usar nombre del video
+    output_template = os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')
 
-    ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
-        'outtmpl': output_template,
-        'noplaylist': True,
-        'quiet': True,
-        'progress_hooks': [lambda d: progress_hook(d, download_id)]
-    }
-
+    # Comando según formato
     if fmt == 'mp3':
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192'
-            }],
-        })
+        cmd = f'./yt-dlp -x --audio-format mp3 -o "{output_template}" --no-playlist "{url}"'
+    else:
+        cmd = f'./yt-dlp -f bestvideo+bestaudio/best -o "{output_template}" --no-playlist "{url}"'
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            if fmt == 'mp3':
-                filename = os.path.splitext(filename)[0] + '.mp3'
+        process = subprocess.Popen(
+            shlex.split(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
 
-            filename = os.path.abspath(filename)
-            basename = os.path.basename(filename)
+        # Parsear progreso aproximado
+        for line in process.stdout:
+            if '%' in line:
+                try:
+                    percent = int(line.split('%')[0].split()[-1])
+                    with progress_lock:
+                        download_progress[download_id] = percent
+                        print(f"[{download_id}] Progreso: {percent}%")
+                except:
+                    pass
 
-            wait_time, stable_checks = 0, 0
-            last_size = -1
-            while wait_time < 20:
-                if os.path.exists(filename):
-                    current_size = os.path.getsize(filename)
-                    if current_size == last_size:
-                        stable_checks += 1
-                    else:
-                        stable_checks = 0
-                    if stable_checks >= 3:
-                        break
-                    last_size = current_size
-                time.sleep(0.5)
-                wait_time += 0.5
+        process.wait()
 
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                with progress_lock:
-                    download_progress[f"{download_id}_file"] = filename
-                    download_progress[f"{download_id}_name"] = basename
-                    download_progress[download_id] = 100
-                    print(f"[{download_id}] Archivo listo: {filename}")
-            else:
-                with progress_lock:
-                    download_progress[download_id] = -1
-                    print(f"[{download_id}] Archivo no válido")
+        # Buscar archivo descargado
+        files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR)]
+        files = [f for f in files if os.path.isfile(f)]
+        files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+
+        if files:
+            filename = files[0]
+            with progress_lock:
+                download_progress[f"{download_id}_file"] = filename
+                download_progress[f"{download_id}_name"] = os.path.basename(filename)
+                download_progress[download_id] = 100
+                print(f"[{download_id}] Archivo listo: {filename}")
+        else:
+            with progress_lock:
+                download_progress[download_id] = -1
+                print(f"[{download_id}] Archivo no válido")
 
     except Exception as e:
         with progress_lock:
             download_progress[download_id] = -1
         print(f"[{download_id}] Error: {e}")
 
+# Worker de la cola
 def queue_worker():
     while True:
         job = download_queue.get()
@@ -117,7 +92,7 @@ def queue_worker():
         download_queue.task_done()
         print(f"[QUEUE] Descarga {download_id} finalizada")
 
-# Limpieza de archivos viejos o en exceso (cada 2 minutos)
+# Limpieza de archivos antiguos o excesivos
 def cleanup_old_files():
     while True:
         try:
@@ -145,19 +120,17 @@ def cleanup_old_files():
 
         time.sleep(120)
 
+# Threads
 worker_thread = threading.Thread(target=queue_worker, daemon=True)
 worker_thread.start()
 
 cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
 cleanup_thread.start()
 
+# Rutas Flask
 @app.route('/')
 def index():
-    return render_template('index.html', version=leer_version())
-
-@app.route('/version')
-def version():
-    return leer_version()
+    return render_template('index.html')
 
 @app.route('/search')
 def search():
@@ -241,23 +214,68 @@ def get_file():
         return send_file(filename, as_attachment=True, download_name=real_name)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 @app.route('/video_url')
 def video_url():
     url = request.args.get('url')
     if not url:
-        return jsonify({'error': 'No URL'}), 400
+        return jsonify({'error': 'URL requerida'}), 400
+
+    # Obtener solo formatos MP4 progresivos (video + audio juntos)
+    cmd = f'./yt-dlp -f "best[ext=mp4]" --get-url "{url}"'
 
     try:
-        opts = {'quiet': True, 'skip_download': True, 'format': 'mp4'}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            for f in info.get('formats', []):
-                if f.get('ext') == 'mp4' and f.get('acodec') != 'none' and f.get('vcodec') != 'none':
-                    return jsonify({'direct_url': f['url']})
-        return jsonify({'error': 'No se encontró URL directa'}), 404
+        result = subprocess.run(shlex.split(cmd), capture_output=True, text=True, check=True)
+        direct_url = result.stdout.strip()
+        return jsonify({'direct_url': direct_url})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'error': 'No se pudo obtener la URL', 'details': e.stderr}), 500
+
+
+@app.route('/video-player')
+def video_player_proxy():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'URL requerida'}), 400
+
+    try:
+        # Detectamos si es un m3u8
+        if url.endswith('.m3u8'):
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                return jsonify({'error': 'No se pudo obtener el m3u8'}), 502
+
+            playlist = r.text
+            modified_lines = []
+
+            for line in playlist.splitlines():
+                line = line.strip()
+                # Reescribimos solo las líneas que no son comentarios y son URLs
+                if line and not line.startswith('#') and line.startswith('http'):
+                    # Escapamos la URL original
+                    proxied_url = f"/video-player?url={quote(line, safe='')}"
+                    modified_lines.append(proxied_url)
+                else:
+                    modified_lines.append(line)
+
+            modified_playlist = "\n".join(modified_lines)
+            return Response(modified_playlist, content_type='application/vnd.apple.mpegurl')
+
+        else:
+            # Si es un TS u otro recurso, lo servimos como stream
+            r = requests.get(url, stream=True, timeout=10)
+            if r.status_code != 200:
+                return jsonify({'error': 'No se pudo obtener el recurso'}), 502
+
+            return Response(
+                r.iter_content(chunk_size=1024*1024),
+                content_type=r.headers.get('content-type', 'application/octet-stream'),
+                status=r.status_code
+            )
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5555))
