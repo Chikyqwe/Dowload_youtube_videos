@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify,Response,send_file, render_template, abort
+from flask import Flask, request, jsonify, Response, send_file, render_template, abort
 import os
 import threading
 import uuid
@@ -13,7 +13,15 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 
+# ---------------------------------------------------------
+# Cuentas fijas de YouTube
+# ---------------------------------------------------------
+YT_EMAIL = "downext5@gmail.com"
+YT_PASS = "extdown78."
+
+# ---------------------------------------------------------
 # Carpeta temporal para descargas
+# ---------------------------------------------------------
 DOWNLOAD_DIR = tempfile.mkdtemp(prefix="downloads_")
 print(f"[INFO] Carpeta temporal: {DOWNLOAD_DIR}")
 
@@ -24,19 +32,31 @@ download_queue = queue.Queue()
 queue_list_lock = threading.Lock()
 queued_ids = []
 
+# ---------------------------------------------------------
 # Función para ejecutar yt-dlp binario
+# ---------------------------------------------------------
 def download_worker(url, fmt, download_id):
     output_template = os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')
 
-    # Comando según formato
+    # Construir comando como lista
+    cmd = ['./yt-dlp', '--no-playlist', '-o', output_template]
+
+    # Elegir formato
     if fmt == 'mp3':
-        cmd = f'./yt-dlp -x --audio-format mp3 -o "{output_template}" --no-playlist "{url}"'
+        cmd += ['-x', '--audio-format', 'mp3']
     else:
-        cmd = f'./yt-dlp -f bestvideo+bestaudio/best -o "{output_template}" --no-playlist "{url}"'
+        cmd += ['-f', 'bestvideo+bestaudio/best']
+
+    # Agregar credenciales fijas
+    if YT_EMAIL and YT_PASS:
+        cmd += ['-u', YT_EMAIL, '-p', YT_PASS]
+
+    # URL a descargar
+    cmd.append(url)
 
     try:
         process = subprocess.Popen(
-            shlex.split(cmd),
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True
@@ -77,7 +97,9 @@ def download_worker(url, fmt, download_id):
             download_progress[download_id] = -1
         print(f"[{download_id}] Error: {e}")
 
+# ---------------------------------------------------------
 # Worker de la cola
+# ---------------------------------------------------------
 def queue_worker():
     while True:
         job = download_queue.get()
@@ -92,7 +114,9 @@ def queue_worker():
         download_queue.task_done()
         print(f"[QUEUE] Descarga {download_id} finalizada")
 
+# ---------------------------------------------------------
 # Limpieza de archivos antiguos o excesivos
+# ---------------------------------------------------------
 def cleanup_old_files():
     while True:
         try:
@@ -120,14 +144,18 @@ def cleanup_old_files():
 
         time.sleep(120)
 
+# ---------------------------------------------------------
 # Threads
+# ---------------------------------------------------------
 worker_thread = threading.Thread(target=queue_worker, daemon=True)
 worker_thread.start()
 
 cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
 cleanup_thread.start()
 
+# ---------------------------------------------------------
 # Rutas Flask
+# ---------------------------------------------------------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -214,22 +242,24 @@ def get_file():
         return send_file(filename, as_attachment=True, download_name=real_name)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 @app.route('/video_url')
 def video_url():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'URL requerida'}), 400
 
-    # Obtener solo formatos MP4 progresivos (video + audio juntos)
-    cmd = f'./yt-dlp -f "best[ext=mp4]" --get-url "{url}"'
+    cmd = ['./yt-dlp', '-f', 'best[ext=mp4]', '--get-url']
+    if YT_EMAIL and YT_PASS:
+        cmd += ['-u', YT_EMAIL, '-p', YT_PASS]
+    cmd.append(url)
 
     try:
-        result = subprocess.run(shlex.split(cmd), capture_output=True, text=True, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         direct_url = result.stdout.strip()
         return jsonify({'direct_url': direct_url})
     except subprocess.CalledProcessError as e:
         return jsonify({'error': 'No se pudo obtener la URL', 'details': e.stderr}), 500
-
 
 @app.route('/video-player')
 def video_player_proxy():
@@ -238,7 +268,6 @@ def video_player_proxy():
         return jsonify({'error': 'URL requerida'}), 400
 
     try:
-        # Detectamos si es un m3u8
         if url.endswith('.m3u8'):
             r = requests.get(url, timeout=10)
             if r.status_code != 200:
@@ -249,9 +278,7 @@ def video_player_proxy():
 
             for line in playlist.splitlines():
                 line = line.strip()
-                # Reescribimos solo las líneas que no son comentarios y son URLs
                 if line and not line.startswith('#') and line.startswith('http'):
-                    # Escapamos la URL original
                     proxied_url = f"/video-player?url={quote(line, safe='')}"
                     modified_lines.append(proxied_url)
                 else:
@@ -259,9 +286,7 @@ def video_player_proxy():
 
             modified_playlist = "\n".join(modified_lines)
             return Response(modified_playlist, content_type='application/vnd.apple.mpegurl')
-
         else:
-            # Si es un TS u otro recurso, lo servimos como stream
             r = requests.get(url, stream=True, timeout=10)
             if r.status_code != 200:
                 return jsonify({'error': 'No se pudo obtener el recurso'}), 502
@@ -275,8 +300,9 @@ def video_player_proxy():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
-
+# ---------------------------------------------------------
+# Ejecutar servidor
+# ---------------------------------------------------------
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5555))
     app.run(debug=False, host='0.0.0.0', port=port)
