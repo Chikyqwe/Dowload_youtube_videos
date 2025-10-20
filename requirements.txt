@@ -1,3 +1,4 @@
 Flask
 youtube-search-python
 httpx==0.23.3
+requests
